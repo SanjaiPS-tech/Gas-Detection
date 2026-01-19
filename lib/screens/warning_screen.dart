@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:vibration/vibration.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audioplayers/audioplayers.dart';
 
 class WarningScreen extends StatefulWidget {
@@ -21,13 +22,7 @@ class _WarningScreenState extends State<WarningScreen> {
   void _startAlarm() async {
     try {
       await _player.setReleaseMode(ReleaseMode.loop);
-      // Using a reliable HTTPS URL for a siren sound.
-      // Ensure the device is online for this to work, otherwise catch block handles it.
-      await _player.play(
-        UrlSource(
-          'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3',
-        ),
-      );
+      await _player.play(AssetSource('sounds/beep.wav'));
     } catch (e) {
       debugPrint("Error playing sound: $e");
     }
@@ -36,10 +31,27 @@ class _WarningScreenState extends State<WarningScreen> {
   }
 
   void _loopVibration() async {
-    bool? hasVibrator = await Vibration.hasVibrator();
-    while (mounted && (hasVibrator ?? false)) {
-      Vibration.vibrate();
-      await Future.delayed(const Duration(milliseconds: 1000));
+    final hasVibrator = await Vibration.hasVibrator();
+    if (hasVibrator == true) {
+      while (mounted) {
+        Vibration.vibrate();
+        await Future.delayed(const Duration(milliseconds: 1000));
+      }
+    }
+  }
+
+  Future<void> _handleSnooze() async {
+    final prefs = await SharedPreferences.getInstance();
+    final snoozeDuration =
+        prefs.getInt('snooze_duration') ?? 5; // Default 5 minutes
+    final snoozeUntil = DateTime.now()
+        .add(Duration(minutes: snoozeDuration))
+        .millisecondsSinceEpoch;
+
+    await prefs.setInt('snooze_until', snoozeUntil);
+
+    if (mounted) {
+      Navigator.pop(context);
     }
   }
 
@@ -94,6 +106,26 @@ class _WarningScreenState extends State<WarningScreen> {
                     color: Colors.red,
                   ),
                   textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(height: 60),
+              ElevatedButton.icon(
+                onPressed: _handleSnooze,
+                icon: const Icon(Icons.alarm_off, size: 32),
+                label: const Text(
+                  'ALARM OFF',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.red.shade900,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 40,
+                    vertical: 15,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
+                  ),
                 ),
               ),
             ],

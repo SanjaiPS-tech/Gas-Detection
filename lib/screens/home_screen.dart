@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/mqtt_service.dart';
+import 'settings_screen.dart';
+import 'warning_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final MqttService mqttService;
@@ -12,208 +15,250 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final TextEditingController _brokerController = TextEditingController(text: 'broker.hivemq.com');
-  final TextEditingController _portController = TextEditingController(text: '1883');
-  final TextEditingController _topicController = TextEditingController(text: 'myhome/test/status');
-  final TextEditingController _messageController = TextEditingController();
-  
-  bool _isConnected = false;
+  double _gasLimit = 300.0;
+  bool _isWarningDialogShown = false;
 
   @override
   void initState() {
     super.initState();
-    // Listen to connection status to update UI state
+    _loadSettingsAndConnect();
+
+    // Listen to connection status
     widget.mqttService.connectionStatusStream.listen((status) {
       if (mounted) {
         setState(() {
-          _isConnected = (status == 'Connected');
+          // No-op for now as we use StreamBuilder in the UI
         });
       }
     });
+
+    // Listen to gas data for alert logic
+    widget.mqttService.gasValueStream.listen((data) {
+      _checkGasLimit(data);
+    });
   }
 
-  void _handleConnect() {
-    final broker = _brokerController.text.trim();
-    final port = int.tryParse(_portController.text.trim()) ?? 1883;
-    final topic = _topicController.text.trim();
+  Future<void> _loadSettingsAndConnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final broker = prefs.getString('mqtt_broker') ?? 'test.mosquitto.org';
+    final port = prefs.getInt('mqtt_port') ?? 1883;
+    final topic = prefs.getString('mqtt_topic') ?? 'esp32/gas/live';
 
-    if (broker.isNotEmpty && topic.isNotEmpty) {
-      widget.mqttService.connect(broker, port, topic);
+    setState(() {
+      _gasLimit = prefs.getDouble('gas_limit') ?? 300.0;
+    });
+
+    // Auto-connect if not already connecting/connected
+    widget.mqttService.connect(broker, port, topic);
+  }
+
+  void _checkGasLimit(double gasValue) async {
+    if (!mounted) return;
+
+    if (gasValue > _gasLimit) {
+      if (!_isWarningDialogShown) {
+        // Check for snooze
+        final prefs = await SharedPreferences.getInstance();
+        final snoozeUntil = prefs.getInt('snooze_until') ?? 0;
+
+        if (DateTime.now().millisecondsSinceEpoch < snoozeUntil) {
+          return; // Snoozed
+        }
+
+        _isWarningDialogShown = true;
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const WarningScreen()),
+        ).then((_) {
+          _isWarningDialogShown = false;
+          _loadSettingsAndConnect(); // Refresh settings/snooze state
+        });
+      }
     }
   }
 
-  void _handleDisconnect() {
-    widget.mqttService.disconnect();
+  void _navigateToSettings() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const SettingsScreen()),
+    );
+
+    if (result == true) {
+      // Settings were saved, reload and reconnect
+      _loadSettingsAndConnect();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('MQTT Monitor'),
+        title: const Text('Gas Monitor'),
         backgroundColor: Colors.blueAccent,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadSettingsAndConnect,
+            tooltip: 'Manual Reload',
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _navigateToSettings,
+            tooltip: 'Settings',
+          ),
+        ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Connection Settings
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  children: [
-                    const Text("Connection Settings", style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _brokerController,
-                      decoration: const InputDecoration(labelText: "Broker", border: OutlineInputBorder()),
-                      enabled: !_isConnected,
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _portController,
-                            decoration: const InputDecoration(labelText: "Port", border: OutlineInputBorder()),
-                            keyboardType: TextInputType.number,
-                            enabled: !_isConnected,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          flex: 2,
-                          child: TextField(
-                            controller: _topicController,
-                            decoration: const InputDecoration(labelText: "Topic", border: OutlineInputBorder()),
-                            enabled: !_isConnected,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 15),
-                    _isConnected 
-                      ? ElevatedButton.icon(
-                          onPressed: _handleDisconnect,
-                          icon: const Icon(Icons.link_off),
-                          label: const Text("Disconnect"),
-                          style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-                        )
-                      : ElevatedButton.icon(
-                          onPressed: _handleConnect,
-                          icon: const Icon(Icons.link),
-                          label: const Text("Connect"),
-                          style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
-                        ),
-                  ],
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            // Connection Status Display
-            Center(
-              child: StreamBuilder<String>(
+      body: RefreshIndicator(
+        onRefresh: _loadSettingsAndConnect,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const SizedBox(height: 20),
+              // Status Indicator
+              StreamBuilder<String>(
                 stream: widget.mqttService.connectionStatusStream,
                 initialData: "Disconnected",
                 builder: (context, snapshot) {
                   String status = snapshot.data ?? "Disconnected";
                   Color color = Colors.red;
-                  if (status == 'Connected') color = Colors.green;
-                  if (status.startsWith('Connecting')) color = Colors.orange;
+                  IconData icon = Icons.cloud_off;
 
-                  return Text(
-                    "Status: $status",
-                    style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16),
-                  );
-                },
-              ),
-            ),
-            
-            const Divider(height: 40),
+                  if (status == 'Connected') {
+                    color = Colors.green;
+                    icon = Icons.cloud_done;
+                  } else if (status.startsWith('Connecting')) {
+                    color = Colors.orange;
+                    icon = Icons.cloud_sync;
+                  }
 
-            // Received Data Display
-            const Text(
-              "Received Data:",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            Container(
-              height: 100,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.shade300),
-              ),
-              alignment: Alignment.center,
-              child: StreamBuilder<String>(
-                stream: widget.mqttService.statusStream,
-                initialData: "No data received yet",
-                builder: (context, snapshot) {
-                  return Text(
-                    snapshot.data ?? "No data",
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w500),
-                    textAlign: TextAlign.center,
-                  );
-                },
-              ),
-            ),
-
-            const SizedBox(height: 30),
-
-            // Publish (Change State)
-            const Text(
-              "Publish Data:",
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    decoration: const InputDecoration(
-                      labelText: "Enter message",
-                      border: OutlineInputBorder(),
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
                     ),
-                    enabled: _isConnected,
-                  ),
+                    decoration: BoxDecoration(
+                      color: color.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: color.withOpacity(0.5)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(icon, color: color, size: 20),
+                        const SizedBox(width: 8),
+                        Text(
+                          status,
+                          style: TextStyle(
+                            color: color,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+
+              const SizedBox(height: 40),
+
+              // Gas Level Display
+              const Text(
+                "Current Gas Level",
+                style: TextStyle(fontSize: 18, color: Colors.grey),
+              ),
+              const SizedBox(height: 10),
+              StreamBuilder<double>(
+                stream: widget.mqttService.gasValueStream,
+                initialData: 0.0,
+                builder: (context, snapshot) {
+                  final gasValue = snapshot.data ?? 0.0;
+
+                  Color textColor = Colors.black;
+                  if (gasValue > _gasLimit) {
+                    textColor = Colors.red;
+                  } else if (gasValue > _gasLimit * 0.7) {
+                    textColor = Colors.orange;
+                  } else {
+                    textColor = Colors.green;
+                  }
+
+                  return Column(
+                    children: [
+                      Text(
+                        gasValue.toStringAsFixed(0),
+                        style: TextStyle(
+                          fontSize: 64,
+                          fontWeight: FontWeight.bold,
+                          color: textColor,
+                        ),
+                      ),
+                      const Text(
+                        "PPM",
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+
+              const SizedBox(height: 40),
+
+              // Gas Limit Info
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _isConnected ? () {
-                    if (_messageController.text.isNotEmpty) {
-                      widget.mqttService.publishMessage(_messageController.text);
-                    }
-                  } : null,
-                  child: const Text("Send"),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      "Alert Limit:",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      "${_gasLimit.toStringAsFixed(1)} PPM",
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blueAccent,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            
-            const Spacer(),
-            
-            // Last Update Timestamp
-            StreamBuilder<DateTime>(
-              stream: widget.mqttService.lastUpdateStream,
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) return const SizedBox.shrink();
-                return Center(
-                  child: Text(
-                    "Last Update: ${DateFormat('HH:mm:ss').format(snapshot.data!)}",
-                    style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 20),
-          ],
+              ),
+
+              const SizedBox(height: 60),
+
+              // Last Update Timestamp
+              StreamBuilder<DateTime>(
+                stream: widget.mqttService.lastUpdateStream,
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData) return const SizedBox.shrink();
+                  return Text(
+                    "Last updated: ${DateFormat('HH:mm:ss').format(snapshot.data!)}",
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
         ),
       ),
     );
